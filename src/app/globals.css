@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+/**
+ * Gharr design tokens.
+ *
+ * Direction from the UI/UX boards: deep navy for structure and headings, a warm
+ * construction orange for every primary action, and green reserved for trust
+ * states (verified, available, delivered). Spacious white cards, 14–18px radii,
+ * soft elevation.
+ *
+ * Token NAMES are stable — `brand` is the action colour and `ink` the text
+ * colour — so a palette change never touches component code.
+ */
+
+@theme {
+  /* Brand — construction orange, for primary CTAs, add buttons, badges and the
+     active tab. 600 is the button fill; 700 is the smallest-text shade. */
+  --color-brand-50: #fff5ed;
+  --color-brand-100: #ffe8d5;
+  --color-brand-200: #ffcdaa;
+  --color-brand-300: #ffa872;
+  --color-brand-400: #fd8039;
+  --color-brand-500: #f76a1c;
+  --color-brand-600: #dc5210;
+  --color-brand-700: #b73e0d;
+  --color-brand-800: #933313;
+  --color-brand-900: #772c13;
+
+  /* Ink — navy, the dominant text colour and the secondary surface. */
+  --color-ink-50: #f5f7fb;
+  --color-ink-100: #eaeef6;
+  --color-ink-200: #d3dbea;
+  --color-ink-300: #aab8d3;
+  --color-ink-400: #7d8fb3;
+  --color-ink-500: #5b6d94;
+  --color-ink-600: #465779;
+  --color-ink-700: #364463;
+  --color-ink-800: #1d3562;
+  --color-ink-900: #0c2657;
+  --color-ink-950: #071a3f;
+
+  /* Trust — verified, available today, delivered, on track. */
+  --color-trust-50: #ecfdf3;
+  --color-trust-100: #d1fadf;
+  --color-trust-500: #22a45d;
+  --color-trust-600: #16884a;
+  --color-trust-700: #12703d;
+
+  /* Accent reserved for price drops and urgency, never for primary actions. */
+  --color-amber-brand: #f59e0b;
+
+  /* Semantic status colours for order and booking timelines. */
+  --color-success: #16884a;
+  --color-warning: #f59e0b;
+  --color-danger: #e03131;
+  --color-info: #1c7ed6;
+
+  --radius-card: 16px;
+  --radius-sheet: 24px;
+  --radius-chip: 999px;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  /* Soft, low-contrast elevation — heavy drop shadows read as dated. */
+  --shadow-card: 0 1px 2px rgb(12 38 87 / 0.04), 0 4px 16px rgb(12 38 87 / 0.07);
+  --shadow-raised: 0 2px 4px rgb(12 38 87 / 0.06), 0 12px 32px rgb(12 38 87 / 0.12);
+  --shadow-sticky: 0 -2px 16px rgb(12 38 87 / 0.08);
+  --shadow-cta: 0 6px 16px rgb(220 82 16 / 0.28);
+}
+
+:root {
+  --bottom-nav-height: 64px;
+  color-scheme: light;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: #ffffff;
+  color: var(--color-ink-900);
+  font-family: var(--font-sans);
+}
+
+/* Below md the primary navigation is a fixed bottom tab bar; content must clear
+   it plus the phone's home indicator. From md up the top nav takes over and the
+   bottom bar is hidden, so the padding goes too. */
+.app-shell {
+  padding-bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 768px) {
+  :root {
+    --bottom-nav-height: 0px;
+  }
+  .app-shell {
+    padding-bottom: 0;
+  }
+}
+
+/* Indian currency figures read better with tabular digits when stacked in a
+   cart or invoice column. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hide scrollbars on the horizontal category/chip rails without losing scroll. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Visible focus for keyboard users; suppressed for mouse/touch. */
+:focus-visible {
+  outline: 2px solid var(--color-brand-600);
+  outline-offset: 2px;
+  border-radius: 6px;
+}

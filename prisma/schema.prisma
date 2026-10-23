@@ -1,0 +1,1304 @@
+// Gharr — India-first marketplace for construction materials + local labour.
+//
+// Modelling conventions used throughout this schema:
+//
+//   Money      All monetary columns are Int paise, suffixed `Paise`. Integer maths is
+//              exact, and Indian payment gateways (Razorpay/PhonePe) already take paise,
+//              so there is no conversion at the boundary. Display formatting happens in
+//              exactly one place: src/shared/money.ts. A single Int column tops out at
+//              ~Rs 2.14 crore; checkout enforces a Rs 1 crore ceiling per order.
+//
+//   Quantity   Decimal(12,3). Sand sells by the tonne, tiles by the box, flooring by
+//              sq.ft — 2.5 boxes is a real order. MOQ and step quantity share the type.
+//
+//   Variants   Every product is variant-backed and the VENDOR LIVES ON THE VARIANT.
+//              Product = shared catalogue identity (name, brand, specs, photos).
+//              ProductVariant = one vendor's sellable offer (pack, price, MOQ, stock).
+//              This gives multi-seller PDPs, per-vendor delivery fees and per-vendor
+//              cart grouping with no special cases.
+//
+//   Time       All DateTime columns are UTC. Booking and delivery slots are IST
+//              wall-clock, so they are stored as a Date plus an integer minute-of-day,
+//              never a naked DateTime. This removes a whole class of 5.5-hour bugs.
+//
+//   Snapshots  Order and booking lines copy the name, price and unit at purchase time.
+//              Editing the catalogue must never rewrite history.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  CUSTOMER
+  VENDOR
+  WORKER
+  DELIVERY_PARTNER
+  ADMIN
+  SUPPORT
+}
+
+enum Unit {
+  BAG
+  KG
+  TONNE
+  PIECE
+  BOX
+  SQFT
+  LITRE
+  BUNDLE
+  /// Sealed containers sold whole: a 20 L paint bucket, a 5 L can, a 5 kg pack.
+  /// `packSize` records the contents; the price is per container.
+  BUCKET
+  CAN
+  PACK
+}
+
+enum DeliveryMode {
+  STANDARD
+  SCHEDULED
+  PICKUP
+}
+
+enum AddressType {
+  HOME
+  SITE
+  OFFICE
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum DocumentType {
+  AADHAAR
+  PAN
+  GST
+  SHOP_LICENSE
+  TRADE_CERT
+  PHOTO_ID
+  BANK_PROOF
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  ACCEPTED
+  PACKED
+  DISPATCHED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  DELIVERY_FAILED
+  CANCELLED
+  RETURN_REQUESTED
+  RETURNED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  CREATED
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUND_PENDING
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  COD
+  UPI
+  CARD
+  NETBANKING
+  WALLET
+  OFFLINE_MOCK
+}
+
+enum Trade {
+  MASON
+  ELECTRICIAN
+  PLUMBER
+  CARPENTER
+  PAINTER
+  TILE_WORKER
+  HELPER
+}
+
+enum RateType {
+  HOURLY
+  DAILY
+  FIXED
+}
+
+enum BookingStatus {
+  REQUESTED
+  ACCEPTED
+  REJECTED
+  CONFIRMED
+  CHECKED_IN
+  IN_PROGRESS
+  COMPLETED
+  APPROVED
+  PAID_OUT
+  CANCELLED_BY_CUSTOMER
+  CANCELLED_BY_WORKER
+  NO_SHOW
+  DISPUTED
+}
+
+enum AvailabilityExceptionType {
+  BLOCKED
+  EXTRA
+}
+
+enum CouponType {
+  PERCENT
+  FLAT
+}
+
+enum CouponScope {
+  ALL
+  CATEGORY
+  VENDOR
+  LABOUR
+}
+
+enum NotificationChannel {
+  IN_APP
+  SMS
+  PUSH
+  EMAIL
+}
+
+enum ReviewSubject {
+  PRODUCT
+  VENDOR
+  WORKER
+}
+
+enum OtpPurpose {
+  LOGIN
+  PHONE_CHANGE
+  BOOKING_CHECKIN
+  DELIVERY_CONFIRM
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+model User {
+  id             String    @id @default(cuid())
+  phoneE164      String    @unique
+  phoneVerifiedAt DateTime?
+  name           String?
+  email          String?
+  avatarUrl      String?
+  // Roles are a fixed, code-coupled set, so they live as an array rather than a
+  // join table — this saves a join on every authenticated request.
+  roles          Role[]    @default([CUSTOMER])
+  isActive       Boolean   @default(true)
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  addresses      Address[]
+  cart           Cart?
+  orders         Order[]
+  bookings       LabourBooking[]
+  reviews        Review[]
+  notifications  Notification[]
+  refreshTokens  RefreshToken[]
+  supportTickets SupportTicket[]
+  redemptions    CouponRedemption[]
+  payments       Payment[]
+  vendor         Vendor?
+  worker         Worker?
+  deliveryPartner DeliveryPartner?
+  estimates      Estimate[]
+  assignedTickets SupportTicket[] @relation("TicketAssignee")
+  ticketMessages  TicketMessage[] @relation("TicketMessageAuthor")
+
+  @@index([phoneE164])
+  @@index([isActive])
+}
+
+/// One row per issued OTP. The code itself is never stored — only an HMAC of
+/// (code + phone) under a server-side pepper.
+model OtpRequest {
+  id          String     @id @default(cuid())
+  phoneE164   String
+  codeHash    String
+  purpose     OtpPurpose @default(LOGIN)
+  expiresAt   DateTime
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  consumedAt  DateTime?
+  ipHash      String?
+  userAgentHash String?
+  createdAt   DateTime   @default(now())
+
+  @@index([phoneE164, createdAt])
+  @@index([ipHash, createdAt])
+  @@index([expiresAt])
+}
+
+/// Opaque refresh tokens, stored hashed and rotated on every use. Presenting an
+/// already-rotated token revokes the whole family — that is stolen-token
+/// containment without any extra infrastructure.
+model RefreshToken {
+  id           String    @id @default(cuid())
+  userId       String
+  tokenHash    String    @unique
+  familyId     String
+  client       String    @default("web")
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedById String?
+  ipHash       String?
+  userAgentHash String?
+  createdAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([familyId])
+}
+
+/// Fixed-window rate limiting in Postgres. A single INSERT ... ON CONFLICT DO
+/// UPDATE ... RETURNING count is race-free in one round trip, which means no
+/// Redis dependency (Redis is not installed and is not worth the operational
+/// cost at this stage).
+model RateLimitCounter {
+  bucket      String
+  key         String
+  windowStart DateTime
+  count       Int      @default(0)
+
+  @@id([bucket, key, windowStart])
+  @@index([windowStart])
+}
+
+model Address {
+  id           String      @id @default(cuid())
+  userId       String
+  type         AddressType @default(HOME)
+  contactName  String
+  contactPhone String
+  line1        String
+  line2        String?
+  landmark     String?
+  city         String
+  state        String
+  pincode      String
+  lat          Float?
+  lng          Float?
+  gstin        String?
+  isDefault    Boolean     @default(false)
+  deletedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isDefault])
+  @@index([pincode])
+}
+
+// ---------------------------------------------------------------------------
+// Vendors
+// ---------------------------------------------------------------------------
+
+model Vendor {
+  id                     String             @id @default(cuid())
+  userId                 String?            @unique
+  businessName           String
+  slug                   String             @unique
+  legalName              String?
+  gstin                  String?
+  phoneE164              String
+  email                  String?
+  logoUrl                String?
+  city                   String
+  state                  String
+  pincode                String
+  servicePincodes        String[]
+  status                 VerificationStatus @default(PENDING)
+  /// Why verification was rejected or paused, shown to the vendor.
+  statusNote             String?
+  ratingAvg              Decimal            @default(0) @db.Decimal(2, 1)
+  ratingCount            Int                @default(0)
+  // Delivery economics are per-vendor: heavy materials are physically shipped by
+  // the seller, so the fee model has to live here rather than platform-wide.
+  baseDeliveryFeePaise   Int                @default(0)
+  perKmFeePaise          Int                @default(0)
+  freeDeliveryAbovePaise Int?
+  maxDeliveryKm          Int                @default(25)
+  minOrderPaise          Int                @default(0)
+  isActive               Boolean            @default(true)
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  user      User?            @relation(fields: [userId], references: [id])
+  documents VendorDocument[]
+  variants  ProductVariant[]
+  orders    Order[]
+  commissions Commission[]
+  payouts   Payout[]
+  reviews   Review[]
+
+  @@index([status, isActive])
+  @@index([city])
+}
+
+model VendorDocument {
+  id         String             @id @default(cuid())
+  vendorId   String
+  type       DocumentType
+  storageKey String
+  status     VerificationStatus @default(PENDING)
+  reviewedBy String?
+  reviewedAt DateTime?
+  notes      String?
+  createdAt  DateTime           @default(now())
+
+  vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@index([vendorId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+model Category {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  iconKey   String?
+  imageUrl  String?
+  parentId  String?
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@index([parentId, sortOrder])
+  @@index([isActive])
+}
+
+model Brand {
+  id       String   @id @default(cuid())
+  slug     String   @unique
+  name     String
+  logoUrl  String?
+  isActive Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  products Product[]
+}
+
+model Product {
+  id               String   @id @default(cuid())
+  slug             String   @unique
+  name             String
+  categoryId       String
+  brandId          String?
+  shortDescription String
+  description      String
+  images           String[]
+  /// Free-form spec sheet, e.g. {"grade":"OPC 53","settingTime":"30 min"}.
+  specs            Json     @default("{}")
+  hsnCode          String?
+  /// Construction materials span 5/18/28% GST. Prices are stored tax-exclusive
+  /// and displayed tax-inclusive.
+  taxRatePercent   Decimal  @default(18) @db.Decimal(4, 2)
+  /// Denormalised "name brand category" text backing the pg_trgm search index.
+  searchText       String
+  isActive         Boolean  @default(true)
+  ratingAvg        Decimal  @default(0) @db.Decimal(2, 1)
+  ratingCount      Int      @default(0)
+  popularityScore  Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  category Category         @relation(fields: [categoryId], references: [id])
+  brand    Brand?           @relation(fields: [brandId], references: [id])
+  variants ProductVariant[]
+  reviews  Review[]
+  estimatePrices EstimatePrice[]
+
+  @@index([categoryId, isActive])
+  @@index([brandId])
+  @@index([popularityScore(sort: Desc)])
+  @@index([isActive, createdAt(sort: Desc)])
+}
+
+/// A single vendor's sellable offer against a catalogue product.
+model ProductVariant {
+  id               String       @id @default(cuid())
+  productId        String
+  vendorId         String
+  sku              String
+  /// Human label shown in the seller list, e.g. "50 kg bag".
+  label            String
+  unit             Unit
+  /// Quantity of `unit` contained in one sellable pack — 50 for a 50 kg bag.
+  /// Also the bridge to the construction calculators planned for V2.
+  packSize         Decimal      @default(1) @db.Decimal(12, 3)
+  mrpPaise         Int
+  pricePaise       Int
+  moqQuantity      Decimal      @default(1) @db.Decimal(12, 3)
+  stepQuantity     Decimal      @default(1) @db.Decimal(12, 3)
+  maxOrderQuantity Decimal?     @db.Decimal(12, 3)
+  deliveryMode     DeliveryMode @default(STANDARD)
+  leadTimeDays     Int          @default(1)
+  weightKgPerUnit  Decimal?     @db.Decimal(10, 3)
+  isActive         Boolean      @default(true)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  product   Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  vendor    Vendor     @relation(fields: [vendorId], references: [id])
+  inventory Inventory?
+  cartItems CartItem[]
+
+  @@unique([vendorId, sku])
+  @@index([productId, isActive])
+  @@index([vendorId])
+  @@index([pricePaise])
+}
+
+model Inventory {
+  id                String   @id @default(cuid())
+  variantId         String   @unique
+  quantityAvailable Decimal  @default(0) @db.Decimal(12, 3)
+  quantityReserved  Decimal  @default(0) @db.Decimal(12, 3)
+  lowStockThreshold Decimal  @default(0) @db.Decimal(12, 3)
+  restockEtaDays    Int?
+  updatedAt         DateTime @updatedAt
+
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Cart -> order
+// ---------------------------------------------------------------------------
+
+model Cart {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  couponCode String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items CartItem[]
+}
+
+model CartItem {
+  id              String   @id @default(cuid())
+  cartId          String
+  variantId       String
+  quantity        Decimal  @db.Decimal(12, 3)
+  /// Price when added, so the cart can warn "price changed since you added this".
+  addedPricePaise Int
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  cart    Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, variantId])
+  @@index([cartId])
+}
+
+/// One order per vendor. A single checkout produces N orders sharing a
+/// `checkoutGroupId` and one Payment keyed on that group — vendors ship
+/// separately, but the customer pays once.
+model Order {
+  id              String        @id @default(cuid())
+  orderNumber     String        @unique
+  checkoutGroupId String
+  userId          String
+  vendorId        String
+  status          OrderStatus   @default(PENDING_PAYMENT)
+
+  /// Snapshot, not a foreign key — deleting an address must not orphan history.
+  deliveryAddress Json
+  deliveryMode    DeliveryMode  @default(STANDARD)
+  deliverySlotDate       DateTime? @db.Date
+  deliverySlotStartMinute Int?
+  deliverySlotEndMinute   Int?
+  customerNote    String?
+
+  itemsSubtotalPaise Int
+  deliveryFeePaise   Int         @default(0)
+  /// Group-level coupon discount prorated onto this order, stored rather than
+  /// re-derived so refunds are arithmetic.
+  discountPaise      Int         @default(0)
+  taxPaise           Int         @default(0)
+  totalPaise         Int
+  commissionPaise    Int         @default(0)
+
+  paymentId     String?
+  paymentMethod PaymentMethod
+  placedAt      DateTime  @default(now())
+  deliveredAt   DateTime?
+  cancelledAt   DateTime?
+  cancelReason  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user     User         @relation(fields: [userId], references: [id])
+  vendor   Vendor       @relation(fields: [vendorId], references: [id])
+  payment  Payment?     @relation(fields: [paymentId], references: [id])
+  items    OrderItem[]
+  events   OrderEvent[]
+  delivery Delivery?
+  refunds  Refund[]
+  reviews  Review[]
+  commissions Commission[]
+  redemptions CouponRedemption[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([vendorId, status])
+  @@index([checkoutGroupId])
+  @@index([status, placedAt])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  variantId String?
+  productId String?
+
+  // Purchase-time snapshot.
+  productName  String
+  variantLabel String
+  vendorName   String
+  unit         Unit
+  imageUrl     String?
+
+  quantity          Decimal @db.Decimal(12, 3)
+  unitPricePaise    Int
+  mrpPaise          Int
+  lineSubtotalPaise Int
+  lineDiscountPaise Int     @default(0)
+  lineTaxPaise      Int     @default(0)
+  lineTotalPaise    Int
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model OrderEvent {
+  id          String       @id @default(cuid())
+  orderId     String
+  fromStatus  OrderStatus?
+  toStatus    OrderStatus
+  actorUserId String?
+  actorRole   String?
+  reason      String?
+  metadata    Json?
+  createdAt   DateTime     @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+}
+
+model Delivery {
+  id                String    @id @default(cuid())
+  orderId           String    @unique
+  deliveryPartnerId String?
+  trackingCode      String?
+  vehicleType       String?
+  vehicleNumber     String?
+  /// Hash only — the plaintext delivery OTP is never stored.
+  otpCodeHash       String?
+  etaAt             DateTime?
+  dispatchedAt      DateTime?
+  deliveredAt       DateTime?
+  /// Points at storage/private, served through a signed URL.
+  proofImageKey     String?
+  attempts          Int       @default(0)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  order           Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  deliveryPartner DeliveryPartner? @relation(fields: [deliveryPartnerId], references: [id])
+
+  @@index([deliveryPartnerId])
+}
+
+model DeliveryPartner {
+  id          String   @id @default(cuid())
+  userId      String?  @unique
+  name        String
+  phoneE164   String
+  vehicleType String
+  capacityKg  Decimal? @db.Decimal(10, 2)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  user       User?      @relation(fields: [userId], references: [id])
+  deliveries Delivery[]
+}
+
+// ---------------------------------------------------------------------------
+// Payments & money-out
+// ---------------------------------------------------------------------------
+
+model Payment {
+  id              String        @id @default(cuid())
+  checkoutGroupId String        @unique
+  userId          String
+  provider        String
+  method          PaymentMethod
+  amountPaise     Int
+  currency        String        @default("INR")
+  status          PaymentStatus @default(CREATED)
+
+  providerOrderId   String?
+  providerPaymentId String?
+  providerSignature String?
+  /// Whitelisted metadata only — { method, last4?, bank?, vpa?, wallet? }.
+  /// Raw card data is never persisted (blueprint section 21).
+  providerPayload   Json?
+  /// Makes a double-tapped checkout return the existing payment rather than
+  /// charging twice.
+  idempotencyKey    String        @unique
+
+  authorizedAt   DateTime?
+  capturedAt     DateTime?
+  failureCode    String?
+  failureMessage String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user     User            @relation(fields: [userId], references: [id])
+  orders   Order[]
+  bookings LabourBooking[]
+  refunds  Refund[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+model Refund {
+  id               String        @id @default(cuid())
+  paymentId        String
+  orderId          String?
+  bookingId        String?
+  amountPaise      Int
+  reason           String
+  status           PaymentStatus @default(REFUND_PENDING)
+  providerRefundId String?
+  processedAt      DateTime?
+  /// Last provider error; the row stays REFUND_PENDING so it can be retried.
+  failureMessage   String?
+  createdAt        DateTime      @default(now())
+
+  payment Payment        @relation(fields: [paymentId], references: [id])
+  order   Order?         @relation(fields: [orderId], references: [id])
+  booking LabourBooking? @relation(fields: [bookingId], references: [id])
+
+  @@index([paymentId])
+}
+
+/// Raw webhook receipts. The (provider, eventId) unique constraint makes
+/// duplicate gateway deliveries a no-op.
+model WebhookEvent {
+  id             String    @id @default(cuid())
+  provider       String
+  eventId        String
+  signatureValid Boolean
+  payload        Json
+  processedAt    DateTime?
+  error          String?
+  createdAt      DateTime  @default(now())
+
+  @@unique([provider, eventId])
+  @@index([provider, createdAt])
+}
+
+model Commission {
+  id              String   @id @default(cuid())
+  orderId         String?
+  bookingId       String?
+  vendorId        String?
+  workerId        String?
+  baseAmountPaise Int
+  ratePercent     Decimal  @db.Decimal(5, 2)
+  commissionPaise Int
+  status          String   @default("ACCRUED")
+  createdAt       DateTime @default(now())
+
+  order   Order?         @relation(fields: [orderId], references: [id])
+  booking LabourBooking? @relation(fields: [bookingId], references: [id])
+  vendor  Vendor?        @relation(fields: [vendorId], references: [id])
+  worker  Worker?        @relation(fields: [workerId], references: [id])
+
+  @@index([vendorId, createdAt])
+  @@index([workerId, createdAt])
+}
+
+model Payout {
+  id              String    @id @default(cuid())
+  vendorId        String?
+  workerId        String?
+  periodStart     DateTime
+  periodEnd       DateTime
+  grossPaise      Int
+  commissionPaise Int
+  netPaise        Int
+  status          String    @default("PENDING")
+  reference       String?
+  paidAt          DateTime?
+  createdAt       DateTime  @default(now())
+
+  vendor Vendor? @relation(fields: [vendorId], references: [id])
+  worker Worker? @relation(fields: [workerId], references: [id])
+
+  @@index([vendorId, periodStart])
+  @@index([workerId, periodStart])
+}
+
+// ---------------------------------------------------------------------------
+// Labour
+// ---------------------------------------------------------------------------
+
+model Worker {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  displayName          String
+  photoUrl             String?
+  bio                  String?
+  phoneVerifiedAt      DateTime?
+  idVerificationStatus VerificationStatus @default(PENDING)
+  /// Why verification was rejected or paused, shown to the worker.
+  statusNote           String?
+  yearsExperience      Int                @default(0)
+  completedJobs        Int                @default(0)
+  ratingAvg            Decimal            @default(0) @db.Decimal(2, 1)
+  ratingCount          Int                @default(0)
+
+  baseLat         Float
+  baseLng         Float
+  baseCity        String
+  basePincode     String
+  serviceRadiusKm Int     @default(15)
+
+  /// Fixed-price jobs are a V2 surface, but the flag and the rate rows exist now
+  /// so enabling them is a config change rather than a migration.
+  acceptsFixedPrice Boolean @default(false)
+
+  isActive        Boolean   @default(true)
+  isAvailableToday Boolean  @default(true)
+  lastActiveAt    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skills     WorkerSkill[]
+  rates      WorkerRate[]
+  documents  WorkerDocument[]
+  availability WorkerAvailability[]
+  exceptions WorkerAvailabilityException[]
+  bookings   LabourBooking[]
+  reviews    Review[]
+  commissions Commission[]
+  payouts    Payout[]
+
+  @@index([isActive, idVerificationStatus])
+  @@index([baseLat, baseLng])
+  @@index([ratingAvg(sort: Desc)])
+  @@index([baseCity])
+}
+
+model WorkerSkill {
+  id              String  @id @default(cuid())
+  workerId        String
+  trade           Trade
+  yearsExperience Int     @default(0)
+  isPrimary       Boolean @default(false)
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([workerId, trade])
+  @@index([trade])
+}
+
+/// Pricing is always the tuple (rateType, amount, quantity). HOURLY -> quantity
+/// is hours; DAILY -> quantity is days; FIXED -> quantity is 1 and amount is the
+/// agreed job price. The FIXED branch is implemented and unit-tested now even
+/// though no UI exposes it yet.
+model WorkerRate {
+  id          String   @id @default(cuid())
+  workerId    String
+  trade       Trade
+  rateType    RateType
+  amountPaise Int
+  minUnits    Decimal  @default(1) @db.Decimal(6, 2)
+  isActive    Boolean  @default(true)
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([workerId, trade, rateType])
+}
+
+model WorkerDocument {
+  id         String             @id @default(cuid())
+  workerId   String
+  type       DocumentType
+  storageKey String
+  status     VerificationStatus @default(PENDING)
+  reviewedBy String?
+  reviewedAt DateTime?
+  notes      String?
+  createdAt  DateTime           @default(now())
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, status])
+}
+
+/// Recurring weekly template. Minutes are IST minute-of-day (540 = 09:00).
+model WorkerAvailability {
+  id          String @id @default(cuid())
+  workerId    String
+  dayOfWeek   Int
+  startMinute Int
+  endMinute   Int
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, dayOfWeek])
+}
+
+/// Overrides on the weekly template for a specific date — leave, festivals, or
+/// extra hours.
+model WorkerAvailabilityException {
+  id          String                    @id @default(cuid())
+  workerId    String
+  date        DateTime                  @db.Date
+  type        AvailabilityExceptionType
+  startMinute Int?
+  endMinute   Int?
+  reason      String?
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, date])
+}
+
+model LabourBooking {
+  id            String        @id @default(cuid())
+  bookingNumber String        @unique
+  userId        String
+  workerId      String
+  trade         Trade
+  status        BookingStatus @default(REQUESTED)
+
+  /// IST wall-clock, deliberately not a DateTime.
+  scheduledDate   DateTime @db.Date
+  startMinute     Int
+  durationMinutes Int
+
+  rateType        RateType
+  rateAmountPaise Int
+  /// Hours for HOURLY, days for DAILY, 1 for FIXED.
+  quantity        Decimal  @db.Decimal(6, 2)
+
+  labourSubtotalPaise  Int
+  extrasPaise          Int  @default(0)
+  platformFeePaise     Int  @default(0)
+  discountPaise        Int  @default(0)
+  estimatedTotalPaise  Int
+  finalTotalPaise      Int?
+  commissionPaise      Int  @default(0)
+
+  addressSnapshot Json
+  workDescription String
+  photoKeys       String[]
+
+  checkedInAt DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+  approvedAt  DateTime?
+  cancelledAt DateTime?
+  cancelReason String?
+  cancellationFeePaise Int @default(0)
+
+  paymentId String?
+  /// Reserved for V2 fixed-price quote negotiation. Adding the LabourQuote table
+  /// later is a non-breaking migration because this nullable FK already exists.
+  quoteId   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User                 @relation(fields: [userId], references: [id])
+  worker  Worker               @relation(fields: [workerId], references: [id])
+  payment Payment?             @relation(fields: [paymentId], references: [id])
+  lines   LabourBookingLine[]
+  events  LabourBookingEvent[]
+  refunds Refund[]
+  reviews Review[]
+  commissions Commission[]
+  redemptions CouponRedemption[]
+
+  @@index([workerId, scheduledDate, startMinute])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+/// Itemised extras on a booking — additional hours, material reimbursement.
+/// This is also exactly the shape a V2 fixed-price quote will use.
+model LabourBookingLine {
+  id               String  @id @default(cuid())
+  bookingId        String
+  kind             String
+  description      String
+  quantity         Decimal @db.Decimal(10, 2)
+  unitAmountPaise  Int
+  totalAmountPaise Int
+
+  booking LabourBooking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+model LabourBookingEvent {
+  id          String         @id @default(cuid())
+  bookingId   String
+  fromStatus  BookingStatus?
+  toStatus    BookingStatus
+  actorUserId String?
+  actorRole   String?
+  reason      String?
+  metadata    Json?
+  createdAt   DateTime       @default(now())
+
+  booking LabourBooking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Cross-cutting
+// ---------------------------------------------------------------------------
+
+model Review {
+  id                 String        @id @default(cuid())
+  authorUserId       String
+  subject            ReviewSubject
+  productId          String?
+  vendorId           String?
+  workerId           String?
+  orderId            String?
+  bookingId          String?
+  rating             Int
+  title              String?
+  body               String?
+  imageKeys          String[]
+  isVerifiedPurchase Boolean       @default(false)
+  status             String        @default("PUBLISHED")
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  author  User           @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+  product Product?       @relation(fields: [productId], references: [id])
+  vendor  Vendor?        @relation(fields: [vendorId], references: [id])
+  worker  Worker?        @relation(fields: [workerId], references: [id])
+  order   Order?         @relation(fields: [orderId], references: [id])
+  booking LabourBooking? @relation(fields: [bookingId], references: [id])
+
+  @@unique([authorUserId, orderId, productId])
+  @@unique([authorUserId, bookingId])
+  @@index([productId, rating])
+  @@index([workerId, createdAt(sort: Desc)])
+  @@index([vendorId])
+}
+
+model Coupon {
+  id               String      @id @default(cuid())
+  code             String      @unique
+  type             CouponType
+  percentValue     Decimal?    @db.Decimal(5, 2)
+  flatPaise        Int?
+  minOrderPaise    Int         @default(0)
+  maxDiscountPaise Int?
+  scope            CouponScope @default(ALL)
+  categoryIds      String[]
+  vendorIds        String[]
+  appliesToLabour  Boolean     @default(false)
+  validFrom        DateTime
+  validTo          DateTime
+  usageLimit       Int?
+  perUserLimit     Int         @default(1)
+  usedCount        Int         @default(0)
+  isActive         Boolean     @default(true)
+  createdAt        DateTime    @default(now())
+
+  redemptions CouponRedemption[]
+
+  @@index([isActive, validTo])
+}
+
+model CouponRedemption {
+  id            String   @id @default(cuid())
+  couponId      String
+  userId        String
+  orderId       String?
+  bookingId     String?
+  discountPaise Int
+  createdAt     DateTime @default(now())
+
+  coupon  Coupon         @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order   Order?         @relation(fields: [orderId], references: [id])
+  booking LabourBooking? @relation(fields: [bookingId], references: [id])
+
+  @@index([couponId, userId])
+}
+
+model Notification {
+  id      String              @id @default(cuid())
+  userId  String
+  channel NotificationChannel @default(IN_APP)
+  type    String
+  title   String
+  body    String
+  data    Json?
+  readAt  DateTime?
+  sentAt  DateTime?
+  createdAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, readAt])
+}
+
+model SupportTicket {
+  id        String       @id @default(cuid())
+  userId    String
+  orderId   String?
+  bookingId String?
+  subject   String
+  message   String
+  status    TicketStatus @default(OPEN)
+  priority  String       @default("NORMAL")
+  /// ORDER | BOOKING | PAYMENT | ACCOUNT | OTHER
+  category  String       @default("OTHER")
+  assignedToId String?
+  resolvedAt DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedTo User?           @relation("TicketAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  messages   TicketMessage[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+  @@index([assignedToId, status])
+}
+
+/// One message in a support thread. The opening message is SupportTicket.message.
+model TicketMessage {
+  id        String   @id @default(cuid())
+  ticketId  String
+  authorId  String
+  body      String
+  isStaff   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User          @relation("TicketMessageAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorUserId String?
+  actorRole   String?
+  action      String
+  entityType  String
+  entityId    String
+  before      Json?
+  after       Json?
+  ip          String?
+  userAgent   String?
+  requestId   String?
+  createdAt   DateTime @default(now())
+
+  @@index([entityType, entityId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Estimate Engine
+//
+// A transparent, rules-based cost calculator: every line is quantity × unit
+// price, with the quantity derived from a published construction norm. Rules
+// (how much per sq ft) and prices (how much per unit, per city) are separate
+// tables so the same house costs differently in different cities.
+// ---------------------------------------------------------------------------
+
+enum EstimateMode {
+  NEW_BUILD
+  RENOVATION
+}
+
+enum EstimateScope {
+  WHOLE_HOUSE
+  BATHROOM
+  KITCHEN
+  FLOORING
+  PAINTING
+}
+
+enum QualityTier {
+  BASIC
+  STANDARD
+  PREMIUM
+}
+
+enum EstimateBucket {
+  MATERIALS
+  LABOUR
+  OTHER
+}
+
+enum QuantityBasis {
+  BUILTUP_SQFT
+  FLOOR_SQFT
+  WALL_SQFT
+  PER_ROOM
+  PER_BATHROOM
+  PER_FLOOR
+  FIXED
+  /// Computed last, as a percentage of the non-percentage lines' subtotal.
+  PERCENT_OF_SUBTOTAL
+}
+
+/// A quantity norm: "`quantityPerBasis` `unit` per one `basis`".
+model EstimateRule {
+  id               String         @id @default(cuid())
+  mode             EstimateMode
+  scope            EstimateScope
+  tier             QualityTier
+  itemKey          String
+  label            String
+  bucket           EstimateBucket
+  basis            QuantityBasis
+  /// For PERCENT_OF_SUBTOTAL this is the percentage itself.
+  quantityPerBasis Decimal        @db.Decimal(12, 4)
+  /// Null only for percentage lines, which are money-only.
+  unit             Unit?
+  wastagePercent   Decimal        @default(0) @db.Decimal(5, 2)
+  sortOrder        Int            @default(0)
+  isActive         Boolean        @default(true)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@unique([mode, scope, tier, itemKey])
+  @@index([mode, scope, tier, isActive])
+}
+
+/// Local price per rule unit, editable per city and tier.
+model EstimatePrice {
+  id             String      @id @default(cuid())
+  city           String
+  tier           QualityTier
+  itemKey        String
+  /// Price of ONE rule unit (one bag, one sq ft, one litre), tax-exclusive.
+  unitPricePaise Int
+  /// The catalogue product the material list buys for this line, if any.
+  productId      String?
+  /// How many rule units one purchasable pack of `productId` covers — a 16 sq ft
+  /// tile box covers 16, a 20 L bucket covers 20. The BOQ divides by this.
+  packCoverage   Decimal     @default(1) @db.Decimal(12, 3)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@unique([city, tier, itemKey])
+  @@index([productId])
+}
+
+model Estimate {
+  id             String        @id @default(cuid())
+  userId         String
+  title          String
+  mode           EstimateMode
+  scope          EstimateScope
+  tier           QualityTier
+  city           String
+  /// The validated wizard inputs, kept so the estimate can be edited later.
+  inputs         Json
+  materialsPaise Int
+  labourPaise    Int
+  otherPaise     Int
+  totalPaise     Int
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lines EstimateLine[]
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+/// Immutable snapshot of one computed line. Later rule or price edits never
+/// rewrite an estimate the customer has already seen.
+model EstimateLine {
+  id             String         @id @default(cuid())
+  estimateId     String
+  itemKey        String
+  label          String
+  bucket         EstimateBucket
+  basis          QuantityBasis
+  quantity       Decimal        @db.Decimal(14, 3)
+  unit           Unit?
+  /// For percentage lines this holds the subtotal the percentage applies to.
+  unitPricePaise Int
+  amountPaise    Int
+  productId      String?
+  packCoverage   Decimal        @default(1) @db.Decimal(12, 3)
+  sortOrder      Int
+
+  estimate Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+
+  @@index([estimateId, sortOrder])
+}

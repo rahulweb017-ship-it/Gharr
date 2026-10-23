@@ -1,0 +1,16 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      // App-local code.
+      "~/*": ["./src/*"],
+      // The web app's platform-free shared code (money, contracts, trades...).
+      // Kept under the same specifier the web app uses, so files in
+      // ../src/shared that import each other via "@/shared/..." resolve here too.
+      "@/shared/*": ["../src/shared/*"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx", ".expo/types/**/*.ts", "expo-env.d.ts"],
+  "exclude": ["node_modules", "dist", "android", "ios"]
+}
