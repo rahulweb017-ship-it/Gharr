@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { NotFoundError } from "@/server/http/errors";
+import { SELLABLE_VARIANT, VISIBLE_PRODUCT } from "@/server/services/visibility";
 
 /**
  * Catalogue reads.
@@ -56,7 +57,7 @@ const LIST_SELECT = {
   brand: { select: { name: true } },
   category: { select: { name: true } },
   variants: {
-    where: { isActive: true },
+    where: SELLABLE_VARIANT,
     orderBy: { pricePaise: "asc" },
     select: {
       pricePaise: true,
@@ -129,7 +130,7 @@ export async function listProducts(filters: ProductFilters = {}) {
   const page = Math.max(1, filters.page ?? 1);
   const perPage = Math.min(60, Math.max(1, filters.perPage ?? 20));
 
-  const variantWhere: Prisma.ProductVariantWhereInput = { isActive: true };
+  const variantWhere: Prisma.ProductVariantWhereInput = { ...SELLABLE_VARIANT };
 
   if (filters.minPricePaise != null || filters.maxPricePaise != null) {
     variantWhere.pricePaise = {
@@ -151,7 +152,7 @@ export async function listProducts(filters: ProductFilters = {}) {
   }
 
   const where: Prisma.ProductWhereInput = {
-    isActive: true,
+    ...VISIBLE_PRODUCT,
     ...(filters.categorySlug ? { category: { slug: filters.categorySlug } } : {}),
     ...(filters.brandSlugs?.length
       ? { brand: { slug: { in: filters.brandSlugs } } }
@@ -205,7 +206,7 @@ export async function getProductBySlug(slug: string) {
   // findFirst so the active flag is part of the lookup: a product an admin has
   // taken off sale must 404 on its direct link, not only vanish from listings.
   const product = await prisma.product.findFirst({
-    where: { slug, isActive: true },
+    where: { slug, ...VISIBLE_PRODUCT },
     select: {
       id: true,
       slug: true,
@@ -221,7 +222,7 @@ export async function getProductBySlug(slug: string) {
       brand: { select: { name: true, slug: true, logoUrl: true } },
       category: { select: { name: true, slug: true } },
       variants: {
-        where: { isActive: true },
+        where: SELLABLE_VARIANT,
         orderBy: { pricePaise: "asc" },
         select: {
           id: true,
@@ -285,10 +286,10 @@ export type ProductDetail = Awaited<ReturnType<typeof getProductBySlug>>;
 export async function getRelatedProducts(productId: string, categorySlug: string) {
   const rows = await prisma.product.findMany({
     where: {
-      isActive: true,
+      ...VISIBLE_PRODUCT,
       category: { slug: categorySlug },
       id: { not: productId },
-      variants: { some: { isActive: true } },
+      variants: { some: SELLABLE_VARIANT },
     },
     orderBy: { popularityScore: "desc" },
     take: 8,
@@ -336,7 +337,7 @@ export async function searchProducts(query: string, limit = 24) {
   const ids = await prisma.$queryRaw<Array<{ id: string }>>`
     SELECT p."id"
     FROM "Product" p
-    WHERE p."isActive" = true AND (${conditions})
+    WHERE p."isActive" = true AND p."reviewStatus" = 'APPROVED' AND (${conditions})
     ORDER BY
       (p."searchText" ILIKE ${`%${normalised}%`}) DESC,
       (${relevance}) DESC,
@@ -347,7 +348,7 @@ export async function searchProducts(query: string, limit = 24) {
   if (ids.length === 0) return [];
 
   const rows = await prisma.product.findMany({
-    where: { id: { in: ids.map((r) => r.id) } },
+    where: { id: { in: ids.map((r) => r.id) }, variants: { some: SELLABLE_VARIANT } },
     select: LIST_SELECT,
   });
 
@@ -361,7 +362,7 @@ export async function searchProducts(query: string, limit = 24) {
 /** Facets for the listing filter sheet, scoped to the current category. */
 export async function getFilterFacets(categorySlug?: string) {
   const productWhere: Prisma.ProductWhereInput = {
-    isActive: true,
+    ...VISIBLE_PRODUCT,
     ...(categorySlug ? { category: { slug: categorySlug } } : {}),
   };
 
@@ -372,7 +373,7 @@ export async function getFilterFacets(categorySlug?: string) {
       select: { slug: true, name: true },
     }),
     prisma.productVariant.aggregate({
-      where: { isActive: true, product: productWhere },
+      where: { ...SELLABLE_VARIANT, product: productWhere },
       _min: { pricePaise: true },
       _max: { pricePaise: true },
     }),

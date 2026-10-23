@@ -2,6 +2,7 @@ import { prisma } from "@/server/db/prisma";
 import { env } from "@/server/env";
 import { ConflictError, NotFoundError, ValidationError } from "@/server/http/errors";
 import { snapQuantity, validateQuantity, type Unit } from "@/shared/units";
+import { SELLABLE_VARIANT, VISIBLE_PRODUCT, isSellable } from "@/server/services/visibility";
 import {
   priceCart,
   type CouponRules,
@@ -71,6 +72,8 @@ export async function getCart(userId: string) {
                   id: true,
                   businessName: true,
                   slug: true,
+                  status: true,
+                  isActive: true,
                   minOrderPaise: true,
                   baseDeliveryFeePaise: true,
                   perKmFeePaise: true,
@@ -108,8 +111,9 @@ export async function getCart(userId: string) {
     const variant = item.variant;
     const quantity = Number(item.quantity);
     const stock = Number(variant.inventory?.quantityAvailable ?? 0);
+    const sellable = isSellable(variant);
 
-    if (!variant.isActive) {
+    if (!sellable) {
       issues.push({
         itemId: item.id,
         message: `${variant.product.name} is no longer available from this seller`,
@@ -136,7 +140,7 @@ export async function getCart(userId: string) {
       });
     }
 
-    if (variant.isActive && stock > 0) {
+    if (sellable && stock > 0) {
       lines.push({
         variantId: variant.id,
         vendorId: variant.vendor.id,
@@ -174,7 +178,7 @@ export async function getCart(userId: string) {
       stockQuantity: stock,
       deliveryMode: variant.deliveryMode,
       leadTimeDays: variant.leadTimeDays,
-      isAvailable: variant.isActive && stock > 0,
+      isAvailable: sellable && stock > 0,
       product: variant.product,
       vendor: variant.vendor,
     };
@@ -250,7 +254,7 @@ export async function addItem(
   requestedQuantity: number,
 ) {
   const variant = await prisma.productVariant.findFirst({
-    where: { id: variantId, isActive: true },
+    where: { id: variantId, ...SELLABLE_VARIANT, product: VISIBLE_PRODUCT },
     select: {
       id: true,
       unit: true,

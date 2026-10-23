@@ -30,7 +30,8 @@ async function request<T>(
       ...init,
       credentials: "same-origin",
       headers: {
-        "content-type": "application/json",
+        // A FormData body needs the browser-generated multipart boundary.
+        ...(init.body instanceof FormData ? {} : { "content-type": "application/json" }),
         "x-gharr-client": "web",
         ...(init.headers ?? {}),
       },
@@ -90,4 +91,9 @@ export function apiPut<T>(path: string, body?: unknown): Promise<ApiResult<T>> {
 
 export function apiDelete<T>(path: string): Promise<ApiResult<T>> {
   return request<T>(path, { method: "DELETE" });
+}
+
+/** Multipart upload (KYC documents). */
+export function apiUpload<T>(path: string, form: FormData): Promise<ApiResult<T>> {
+  return request<T>(path, { method: "POST", body: form });
 }

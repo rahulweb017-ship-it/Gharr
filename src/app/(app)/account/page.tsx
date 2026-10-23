@@ -57,7 +57,7 @@ export default async function AccountPage() {
   ]);
 
   // Ops surfaces are shown only to the roles that can use them.
-  const isVendor = user.roles.includes("VENDOR") || user.roles.includes("ADMIN");
+  const isVendor = user.roles.includes("VENDOR");
   const isWorker = user.roles.includes("WORKER");
   const isStaff = user.roles.includes("ADMIN") || user.roles.includes("SUPPORT");
 
@@ -77,7 +77,9 @@ export default async function AccountPage() {
         { href: "/account/addresses", label: "Saved addresses", icon: MapPin, meta: String(user.addresses.length) },
         { href: "/location?next=/account", label: "City", icon: MapPin, meta: city },
         ...(isStaff ? [{ href: "/admin", label: "Admin console", icon: ShieldCheck }] : []),
-        ...(isVendor ? [{ href: "/vendor-ops", label: "Vendor operations", icon: Store }] : []),
+        isVendor
+          ? { href: "/supplier", label: "Supplier portal", icon: Store }
+          : { href: "/sell", label: "Sell on Gharr", icon: Store },
         ...(isWorker ? [{ href: "/worker", label: "Worker console", icon: Wrench }] : []),
       ],
     },

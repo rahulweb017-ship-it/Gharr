@@ -2,15 +2,16 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import type { Actor } from "@/server/auth/session";
 import { type RequestMeta, writeAudit } from "@/server/audit";
-import { NotFoundError, ValidationError } from "@/server/http/errors";
+import { ConflictError, NotFoundError, ValidationError } from "@/server/http/errors";
 import { pageArgs, requireStaff } from "./guard";
 import { changedFields, variantEditErrors } from "./catalog-admin-rules";
 import { UNIT_META, type Unit } from "@/shared/units";
 
 /**
  * Admin catalogue: read the product table and correct live offers (price, MRP,
- * stock, active) on existing products. Creating products belongs to the future
- * supplier portal, so there is deliberately no create path here.
+ * stock, active) on existing products, and review the products suppliers
+ * submit from the supplier portal — approval is the only way a supplier's new
+ * product reaches the storefront.
  *
  * Every write is ADMIN-only, runs in one transaction with its audit row, and
  * records only the fields that actually changed — an audit diff full of
@@ -191,9 +192,12 @@ export async function updateProduct(
   const staff = await requireStaff(actor, "ADMIN");
 
   return prisma.$transaction(async (tx) => {
-    const current = await tx.product.findUnique({ where: { id }, select: { id: true, isActive: true } });
+    const current = await tx.product.findUnique({ where: { id }, select: { id: true, isActive: true, reviewStatus: true } });
     if (!current) throw new NotFoundError("Product");
-    if (current.isActive === input.isActive) return current;
+    if (current.isActive === input.isActive) return { id: current.id, isActive: current.isActive };
+    if (input.isActive && current.reviewStatus !== "APPROVED") {
+      throw new ConflictError("Approve this supplier submission before putting it on sale");
+    }
 
     const updated = await tx.product.update({
       where: { id },
@@ -311,5 +315,98 @@ export async function updateVariant(
       ...stock.after,
       changed: offer.changed || stock.changed,
     };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Supplier submissions
+// ---------------------------------------------------------------------------
+
+export async function listPendingProducts(actor: Actor | null) {
+  await requireStaff(actor, "ADMIN");
+  const rows = await prisma.product.findMany({
+    where: { reviewStatus: "PENDING" },
+    orderBy: { createdAt: "asc" },
+    take: 100,
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      shortDescription: true,
+      description: true,
+      images: true,
+      hsnCode: true,
+      taxRatePercent: true,
+      createdAt: true,
+      category: { select: { name: true } },
+      brand: { select: { name: true } },
+      submittedByVendor: { select: { id: true, businessName: true, status: true } },
+      variants: {
+        select: { id: true, sku: true, label: true, unit: true, packSize: true, mrpPaise: true, pricePaise: true, inventory: { select: { quantityAvailable: true } } },
+      },
+    },
+  });
+  return rows.map((p) => ({
+    ...p,
+    taxRatePercent: Number(p.taxRatePercent),
+    variants: p.variants.map((v) => ({ ...v, packSize: Number(v.packSize), stock: Number(v.inventory?.quantityAvailable ?? 0) })),
+  }));
+}
+
+export type PendingProduct = Awaited<ReturnType<typeof listPendingProducts>>[number];
+
+export async function reviewProduct(
+  actor: Actor | null,
+  id: string,
+  input: { decision: "APPROVED" | "REJECTED"; note?: string | null },
+  meta: RequestMeta = {},
+) {
+  const staff = await requireStaff(actor, "ADMIN");
+  const note = input.note?.trim() || null;
+  if (input.decision === "REJECTED" && (!note || note.length < 5)) {
+    throw new ValidationError("Tell the supplier why it was rejected", [{ field: "note", message: "At least 5 characters" }]);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const product = await tx.product.findUnique({
+      where: { id },
+      select: { id: true, name: true, reviewStatus: true, isActive: true, submittedByVendor: { select: { userId: true } } },
+    });
+    if (!product) throw new NotFoundError("Product");
+    if (product.reviewStatus !== "PENDING") throw new ConflictError("This product has already been reviewed");
+
+    const approved = input.decision === "APPROVED";
+    const updated = await tx.product.update({
+      where: { id },
+      data: { reviewStatus: input.decision, reviewNote: approved ? null : note, isActive: approved },
+      select: { id: true, reviewStatus: true, isActive: true, reviewNote: true },
+    });
+
+    const userId = product.submittedByVendor?.userId;
+    if (userId) {
+      await tx.notification.create({
+        data: {
+          userId,
+          type: `product.review.${input.decision.toLowerCase()}`,
+          title: approved ? "Product approved" : "Product not approved",
+          body: approved
+            ? `${product.name} is now live on Gharr.`
+            : `${product.name} was not approved: ${note}`,
+          data: { productId: id },
+        },
+      });
+    }
+
+    await writeAudit(tx, {
+      actor: staff,
+      actorRole: "ADMIN",
+      action: "product.review",
+      entityType: "Product",
+      entityId: id,
+      before: { reviewStatus: product.reviewStatus, isActive: product.isActive },
+      after: updated,
+      ...meta,
+    });
+    return updated;
   });
 }

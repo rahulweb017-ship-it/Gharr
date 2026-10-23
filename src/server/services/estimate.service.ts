@@ -3,6 +3,7 @@ import { prisma } from "@/server/db/prisma";
 import { logger } from "@/server/logger";
 import { AppError, NotFoundError, ValidationError, isAppError } from "@/server/http/errors";
 import { addItem } from "@/server/services/cart.service";
+import { SELLABLE_VENDOR } from "@/server/services/visibility";
 import {
   computeEstimate,
   MissingPriceError,
@@ -235,7 +236,7 @@ async function bestOffers(productIds: string[]) {
       productId: { in: productIds },
       isActive: true,
       inventory: { quantityAvailable: { gt: 0 } },
-      vendor: { isActive: true },
+      vendor: SELLABLE_VENDOR,
     },
     orderBy: { pricePaise: "asc" },
     select: {

@@ -2,10 +2,11 @@ import type { OrderStatus } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { env } from "@/server/env";
 import { logger } from "@/server/logger";
-import { ConflictError, ForbiddenError, NotFoundError } from "@/server/http/errors";
+import { ConflictError, NotFoundError } from "@/server/http/errors";
 import type { Actor } from "@/server/auth/session";
 import { writeAudit, type RequestMeta } from "@/server/audit";
 import { refundCancelledOrder } from "./refund.service";
+import { vendorIdFor } from "./vendor/vendor-scope";
 import {
   DISPATCH_POINT,
   allowedTransitions,
@@ -31,16 +32,18 @@ function actorRole(actor: Actor): TransitionRole {
 }
 
 /**
- * The vendor profile a VENDOR actor acts for. A vendor may only ever see and
- * move its own orders; without a profile it can see none.
+ * The role an actor acts in for one specific order. Suppliers are customers
+ * too: on an order they placed with another seller they act as the buyer, and
+ * must see and cancel it as one rather than being scoped out as a vendor.
  */
-async function vendorIdFor(actor: Actor): Promise<string> {
-  const vendor = await prisma.vendor.findUnique({
-    where: { userId: actor.userId },
-    select: { id: true },
-  });
-  if (!vendor) throw new ForbiddenError("No vendor profile is linked to this account");
-  return vendor.id;
+async function roleForOrder(actor: Actor, orderId: string, base: TransitionRole): Promise<TransitionRole> {
+  if (base !== "VENDOR") return base;
+  const [vendor, order] = await Promise.all([
+    prisma.vendor.findUnique({ where: { userId: actor.userId }, select: { id: true } }),
+    prisma.order.findUnique({ where: { id: orderId }, select: { vendorId: true, userId: true } }),
+  ]);
+  if (order && order.userId === actor.userId && order.vendorId !== vendor?.id) return "CUSTOMER";
+  return base;
 }
 
 /** Row filter for order reads and writes, by the role the actor acts in. */
@@ -108,9 +111,10 @@ export async function listOrders(userId: string, page = 1, perPage = 20) {
  */
 export async function getOrder(orderId: string, actor: Actor) {
   // SUPPORT staff read orders to answer tickets but cannot act on them.
+  const actingRole = await roleForOrder(actor, orderId, actorRole(actor));
   const readRole: TransitionRole = actor.roles.includes("SUPPORT") && !actor.roles.includes("ADMIN")
     ? "ADMIN"
-    : actorRole(actor);
+    : actingRole;
 
   const order = await prisma.order.findFirst({
     where: {
@@ -177,7 +181,7 @@ export async function getOrder(orderId: string, actor: Actor) {
   return {
     ...order,
     items: order.items.map((item) => ({ ...item, quantity: Number(item.quantity) })),
-    availableActions: allowedTransitions(order.status, actorRole(actor)),
+    availableActions: allowedTransitions(order.status, actingRole),
   };
 }
 
@@ -202,7 +206,7 @@ export async function transition(
   toStatus: OrderStatus,
   options: TransitionOptions = {},
 ) {
-  const role: TransitionRole = options.system ? "SYSTEM" : actorRole(actor);
+  const role: TransitionRole = options.system ? "SYSTEM" : await roleForOrder(actor, orderId, actorRole(actor));
 
   const order = await prisma.order.findFirst({
     where: {
@@ -413,23 +417,26 @@ export async function cancelOrder(actor: Actor, orderId: string, reason: string)
  * Vendor-facing queue for the ops console. Vendor users see only their own
  * orders; admins see everything.
  */
-export async function listVendorOrders(actor: Actor, status?: OrderStatus) {
+export async function listVendorOrders(
+  actor: Actor,
+  status?: OrderStatus,
+  filters: { statuses?: OrderStatus[]; q?: string; take?: number } = {},
+) {
   const isAdmin = actor.roles.includes("ADMIN");
 
-  if (!isAdmin && !actor.roles.includes("VENDOR")) {
-    throw new ForbiddenError();
-  }
-
-  // A VENDOR without a linked profile used to fall through to every order.
+  // Scoped by the linked vendor profile, which throws for an account without
+  // one — a VENDOR without a profile used to fall through to every order.
   const vendorId = isAdmin ? null : await vendorIdFor(actor);
+  const statuses = status ? [status] : filters.statuses;
 
   const rows = await prisma.order.findMany({
     where: {
       ...(vendorId ? { vendorId } : {}),
-      ...(status ? { status } : {}),
+      ...(statuses?.length ? { status: { in: statuses } } : {}),
+      ...(filters.q ? { orderNumber: { contains: filters.q.trim().toUpperCase() } } : {}),
     },
     orderBy: { placedAt: "desc" },
-    take: 50,
+    take: filters.take ?? 50,
     select: {
       id: true,
       orderNumber: true,

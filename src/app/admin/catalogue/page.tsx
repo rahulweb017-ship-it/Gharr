@@ -1,12 +1,13 @@
 import { getPageActor } from "@/server/auth/page-session";
 import { ForbiddenError } from "@/server/http/errors";
-import { listCategoryOptions, listProducts } from "@/server/services/admin/catalog-admin.service";
+import { listCategoryOptions, listPendingProducts, listProducts } from "@/server/services/admin/catalog-admin.service";
 import { AdminPageHeader } from "@/components/admin/AdminShell";
 import { DataTable, Pagination, type Column } from "@/components/admin/DataTable";
 import { FilterBar } from "@/components/admin/FilterBar";
 import { NeedsAdmin } from "@/components/admin/catalogue/NeedsAdmin";
 import { Chip } from "@/components/ui/Chip";
 import { Money } from "@/components/ui/Money";
+import { ButtonLink } from "@/components/ui/Button";
 
 export const metadata = { title: "Catalogue" };
 
@@ -70,8 +71,9 @@ export default async function CataloguePage({ searchParams }: { searchParams: Pr
 
   let data: Awaited<ReturnType<typeof listProducts>>;
   let categories: Awaited<ReturnType<typeof listCategoryOptions>>;
+  let pending: Awaited<ReturnType<typeof listPendingProducts>>;
   try {
-    [data, categories] = await Promise.all([
+    [data, categories, pending] = await Promise.all([
       listProducts(actor, {
         q: params.q,
         categoryId: params.category || undefined,
@@ -80,6 +82,7 @@ export default async function CataloguePage({ searchParams }: { searchParams: Pr
         page: Number(params.page) || 1,
       }),
       listCategoryOptions(actor),
+      listPendingProducts(actor),
     ]);
   } catch (error) {
     if (error instanceof ForbiddenError) return <NeedsAdmin title="Catalogue" />;
@@ -91,6 +94,11 @@ export default async function CataloguePage({ searchParams }: { searchParams: Pr
       <AdminPageHeader
         title="Catalogue"
         description="Correct live offers on existing products — price, MRP, stock and availability. New products come from suppliers."
+        actions={
+          <ButtonLink href="/admin/catalogue/pending" size="sm" variant={pending.length ? "primary" : "outline"}>
+            Supplier submissions{pending.length ? ` (${pending.length})` : ""}
+          </ButtonLink>
+        }
       />
       <FilterBar
         action="/admin/catalogue"

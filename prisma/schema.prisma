@@ -201,41 +201,50 @@ enum TicketStatus {
   CLOSED
 }
 
+/// Moderation state of a catalogue product. Admin-created products are
+/// APPROVED; products a supplier submits wait as PENDING until an admin
+/// reviews them, and never reach the storefront before that.
+enum ProductReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 // ---------------------------------------------------------------------------
 // Identity & access
 // ---------------------------------------------------------------------------
 
 model User {
-  id             String    @id @default(cuid())
-  phoneE164      String    @unique
+  id              String    @id @default(cuid())
+  phoneE164       String    @unique
   phoneVerifiedAt DateTime?
-  name           String?
-  email          String?
-  avatarUrl      String?
+  name            String?
+  email           String?
+  avatarUrl       String?
   // Roles are a fixed, code-coupled set, so they live as an array rather than a
   // join table — this saves a join on every authenticated request.
-  roles          Role[]    @default([CUSTOMER])
-  isActive       Boolean   @default(true)
-  lastLoginAt    DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  roles           Role[]    @default([CUSTOMER])
+  isActive        Boolean   @default(true)
+  lastLoginAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  addresses      Address[]
-  cart           Cart?
-  orders         Order[]
-  bookings       LabourBooking[]
-  reviews        Review[]
-  notifications  Notification[]
-  refreshTokens  RefreshToken[]
-  supportTickets SupportTicket[]
-  redemptions    CouponRedemption[]
-  payments       Payment[]
-  vendor         Vendor?
-  worker         Worker?
+  addresses       Address[]
+  cart            Cart?
+  orders          Order[]
+  bookings        LabourBooking[]
+  reviews         Review[]
+  notifications   Notification[]
+  refreshTokens   RefreshToken[]
+  supportTickets  SupportTicket[]
+  redemptions     CouponRedemption[]
+  payments        Payment[]
+  vendor          Vendor?
+  worker          Worker?
   deliveryPartner DeliveryPartner?
-  estimates      Estimate[]
-  assignedTickets SupportTicket[] @relation("TicketAssignee")
-  ticketMessages  TicketMessage[] @relation("TicketMessageAuthor")
+  estimates       Estimate[]
+  assignedTickets SupportTicket[]    @relation("TicketAssignee")
+  ticketMessages  TicketMessage[]    @relation("TicketMessageAuthor")
 
   @@index([phoneE164])
   @@index([isActive])
@@ -244,17 +253,17 @@ model User {
 /// One row per issued OTP. The code itself is never stored — only an HMAC of
 /// (code + phone) under a server-side pepper.
 model OtpRequest {
-  id          String     @id @default(cuid())
-  phoneE164   String
-  codeHash    String
-  purpose     OtpPurpose @default(LOGIN)
-  expiresAt   DateTime
-  attempts    Int        @default(0)
-  maxAttempts Int        @default(5)
-  consumedAt  DateTime?
-  ipHash      String?
+  id            String     @id @default(cuid())
+  phoneE164     String
+  codeHash      String
+  purpose       OtpPurpose @default(LOGIN)
+  expiresAt     DateTime
+  attempts      Int        @default(0)
+  maxAttempts   Int        @default(5)
+  consumedAt    DateTime?
+  ipHash        String?
   userAgentHash String?
-  createdAt   DateTime   @default(now())
+  createdAt     DateTime   @default(now())
 
   @@index([phoneE164, createdAt])
   @@index([ipHash, createdAt])
@@ -265,17 +274,17 @@ model OtpRequest {
 /// already-rotated token revokes the whole family — that is stolen-token
 /// containment without any extra infrastructure.
 model RefreshToken {
-  id           String    @id @default(cuid())
-  userId       String
-  tokenHash    String    @unique
-  familyId     String
-  client       String    @default("web")
-  expiresAt    DateTime
-  revokedAt    DateTime?
-  replacedById String?
-  ipHash       String?
+  id            String    @id @default(cuid())
+  userId        String
+  tokenHash     String    @unique
+  familyId      String
+  client        String    @default("web")
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  replacedById  String?
+  ipHash        String?
   userAgentHash String?
-  createdAt    DateTime  @default(now())
+  createdAt     DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -357,13 +366,14 @@ model Vendor {
   createdAt              DateTime           @default(now())
   updatedAt              DateTime           @updatedAt
 
-  user      User?            @relation(fields: [userId], references: [id])
-  documents VendorDocument[]
-  variants  ProductVariant[]
-  orders    Order[]
-  commissions Commission[]
-  payouts   Payout[]
-  reviews   Review[]
+  user              User?            @relation(fields: [userId], references: [id])
+  documents         VendorDocument[]
+  variants          ProductVariant[]
+  orders            Order[]
+  commissions       Commission[]
+  payouts           Payout[]
+  reviews           Review[]
+  submittedProducts Product[]        @relation("VendorSubmittedProducts")
 
   @@index([status, isActive])
   @@index([city])
@@ -410,50 +420,58 @@ model Category {
 }
 
 model Brand {
-  id       String   @id @default(cuid())
-  slug     String   @unique
-  name     String
-  logoUrl  String?
-  isActive Boolean  @default(true)
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  logoUrl   String?
+  isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
 
   products Product[]
 }
 
 model Product {
-  id               String   @id @default(cuid())
-  slug             String   @unique
-  name             String
-  categoryId       String
-  brandId          String?
-  shortDescription String
-  description      String
-  images           String[]
+  id                  String              @id @default(cuid())
+  slug                String              @unique
+  name                String
+  categoryId          String
+  brandId             String?
+  shortDescription    String
+  description         String
+  images              String[]
   /// Free-form spec sheet, e.g. {"grade":"OPC 53","settingTime":"30 min"}.
-  specs            Json     @default("{}")
-  hsnCode          String?
+  specs               Json                @default("{}")
+  hsnCode             String?
   /// Construction materials span 5/18/28% GST. Prices are stored tax-exclusive
   /// and displayed tax-inclusive.
-  taxRatePercent   Decimal  @default(18) @db.Decimal(4, 2)
+  taxRatePercent      Decimal             @default(18) @db.Decimal(4, 2)
   /// Denormalised "name brand category" text backing the pg_trgm search index.
-  searchText       String
-  isActive         Boolean  @default(true)
-  ratingAvg        Decimal  @default(0) @db.Decimal(2, 1)
-  ratingCount      Int      @default(0)
-  popularityScore  Int      @default(0)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  searchText          String
+  isActive            Boolean             @default(true)
+  ratingAvg           Decimal             @default(0) @db.Decimal(2, 1)
+  ratingCount         Int                 @default(0)
+  popularityScore     Int                 @default(0)
+  reviewStatus        ProductReviewStatus @default(APPROVED)
+  /// The supplier that proposed this product; null for admin-created products.
+  submittedByVendorId String?
+  /// Why a submission was rejected, shown to the supplier.
+  reviewNote          String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
 
-  category Category         @relation(fields: [categoryId], references: [id])
-  brand    Brand?           @relation(fields: [brandId], references: [id])
-  variants ProductVariant[]
-  reviews  Review[]
-  estimatePrices EstimatePrice[]
+  category          Category         @relation(fields: [categoryId], references: [id])
+  submittedByVendor Vendor?          @relation("VendorSubmittedProducts", fields: [submittedByVendorId], references: [id])
+  brand             Brand?           @relation(fields: [brandId], references: [id])
+  variants          ProductVariant[]
+  reviews           Review[]
+  estimatePrices    EstimatePrice[]
 
   @@index([categoryId, isActive])
   @@index([brandId])
   @@index([popularityScore(sort: Desc)])
   @@index([isActive, createdAt(sort: Desc)])
+  @@index([reviewStatus, createdAt])
+  @@index([submittedByVendorId])
 }
 
 /// A single vendor's sellable offer against a catalogue product.
@@ -539,47 +557,47 @@ model CartItem {
 /// `checkoutGroupId` and one Payment keyed on that group — vendors ship
 /// separately, but the customer pays once.
 model Order {
-  id              String        @id @default(cuid())
-  orderNumber     String        @unique
+  id              String      @id @default(cuid())
+  orderNumber     String      @unique
   checkoutGroupId String
   userId          String
   vendorId        String
-  status          OrderStatus   @default(PENDING_PAYMENT)
+  status          OrderStatus @default(PENDING_PAYMENT)
 
   /// Snapshot, not a foreign key — deleting an address must not orphan history.
-  deliveryAddress Json
-  deliveryMode    DeliveryMode  @default(STANDARD)
-  deliverySlotDate       DateTime? @db.Date
+  deliveryAddress         Json
+  deliveryMode            DeliveryMode @default(STANDARD)
+  deliverySlotDate        DateTime?    @db.Date
   deliverySlotStartMinute Int?
   deliverySlotEndMinute   Int?
-  customerNote    String?
+  customerNote            String?
 
   itemsSubtotalPaise Int
-  deliveryFeePaise   Int         @default(0)
+  deliveryFeePaise   Int @default(0)
   /// Group-level coupon discount prorated onto this order, stored rather than
   /// re-derived so refunds are arithmetic.
-  discountPaise      Int         @default(0)
-  taxPaise           Int         @default(0)
+  discountPaise      Int @default(0)
+  taxPaise           Int @default(0)
   totalPaise         Int
-  commissionPaise    Int         @default(0)
+  commissionPaise    Int @default(0)
 
   paymentId     String?
   paymentMethod PaymentMethod
-  placedAt      DateTime  @default(now())
+  placedAt      DateTime      @default(now())
   deliveredAt   DateTime?
   cancelledAt   DateTime?
   cancelReason  String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 
-  user     User         @relation(fields: [userId], references: [id])
-  vendor   Vendor       @relation(fields: [vendorId], references: [id])
-  payment  Payment?     @relation(fields: [paymentId], references: [id])
-  items    OrderItem[]
-  events   OrderEvent[]
-  delivery Delivery?
-  refunds  Refund[]
-  reviews  Review[]
+  user        User               @relation(fields: [userId], references: [id])
+  vendor      Vendor             @relation(fields: [vendorId], references: [id])
+  payment     Payment?           @relation(fields: [paymentId], references: [id])
+  items       OrderItem[]
+  events      OrderEvent[]
+  delivery    Delivery?
+  refunds     Refund[]
+  reviews     Review[]
   commissions Commission[]
   redemptions CouponRedemption[]
 
@@ -692,7 +710,7 @@ model Payment {
   providerPayload   Json?
   /// Makes a double-tapped checkout return the existing payment rather than
   /// charging twice.
-  idempotencyKey    String        @unique
+  idempotencyKey    String  @unique
 
   authorizedAt   DateTime?
   capturedAt     DateTime?
@@ -812,28 +830,28 @@ model Worker {
   baseLng         Float
   baseCity        String
   basePincode     String
-  serviceRadiusKm Int     @default(15)
+  serviceRadiusKm Int    @default(15)
 
   /// Fixed-price jobs are a V2 surface, but the flag and the rate rows exist now
   /// so enabling them is a config change rather than a migration.
   acceptsFixedPrice Boolean @default(false)
 
-  isActive        Boolean   @default(true)
-  isAvailableToday Boolean  @default(true)
-  lastActiveAt    DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  isActive         Boolean   @default(true)
+  isAvailableToday Boolean   @default(true)
+  lastActiveAt     DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  skills     WorkerSkill[]
-  rates      WorkerRate[]
-  documents  WorkerDocument[]
+  user         User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skills       WorkerSkill[]
+  rates        WorkerRate[]
+  documents    WorkerDocument[]
   availability WorkerAvailability[]
-  exceptions WorkerAvailabilityException[]
-  bookings   LabourBooking[]
-  reviews    Review[]
-  commissions Commission[]
-  payouts    Payout[]
+  exceptions   WorkerAvailabilityException[]
+  bookings     LabourBooking[]
+  reviews      Review[]
+  commissions  Commission[]
+  payouts      Payout[]
 
   @@index([isActive, idVerificationStatus])
   @@index([baseLat, baseLng])
@@ -935,25 +953,25 @@ model LabourBooking {
   /// Hours for HOURLY, days for DAILY, 1 for FIXED.
   quantity        Decimal  @db.Decimal(6, 2)
 
-  labourSubtotalPaise  Int
-  extrasPaise          Int  @default(0)
-  platformFeePaise     Int  @default(0)
-  discountPaise        Int  @default(0)
-  estimatedTotalPaise  Int
-  finalTotalPaise      Int?
-  commissionPaise      Int  @default(0)
+  labourSubtotalPaise Int
+  extrasPaise         Int  @default(0)
+  platformFeePaise    Int  @default(0)
+  discountPaise       Int  @default(0)
+  estimatedTotalPaise Int
+  finalTotalPaise     Int?
+  commissionPaise     Int  @default(0)
 
   addressSnapshot Json
   workDescription String
   photoKeys       String[]
 
-  checkedInAt DateTime?
-  startedAt   DateTime?
-  completedAt DateTime?
-  approvedAt  DateTime?
-  cancelledAt DateTime?
-  cancelReason String?
-  cancellationFeePaise Int @default(0)
+  checkedInAt          DateTime?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  approvedAt           DateTime?
+  cancelledAt          DateTime?
+  cancelReason         String?
+  cancellationFeePaise Int       @default(0)
 
   paymentId String?
   /// Reserved for V2 fixed-price quote negotiation. Adding the LabourQuote table
@@ -963,13 +981,13 @@ model LabourBooking {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user    User                 @relation(fields: [userId], references: [id])
-  worker  Worker               @relation(fields: [workerId], references: [id])
-  payment Payment?             @relation(fields: [paymentId], references: [id])
-  lines   LabourBookingLine[]
-  events  LabourBookingEvent[]
-  refunds Refund[]
-  reviews Review[]
+  user        User                 @relation(fields: [userId], references: [id])
+  worker      Worker               @relation(fields: [workerId], references: [id])
+  payment     Payment?             @relation(fields: [paymentId], references: [id])
+  lines       LabourBookingLine[]
+  events      LabourBookingEvent[]
+  refunds     Refund[]
+  reviews     Review[]
   commissions Commission[]
   redemptions CouponRedemption[]
 
@@ -1089,16 +1107,16 @@ model CouponRedemption {
 }
 
 model Notification {
-  id      String              @id @default(cuid())
-  userId  String
-  channel NotificationChannel @default(IN_APP)
-  type    String
-  title   String
-  body    String
-  data    Json?
-  readAt  DateTime?
-  sentAt  DateTime?
-  createdAt DateTime          @default(now())
+  id        String              @id @default(cuid())
+  userId    String
+  channel   NotificationChannel @default(IN_APP)
+  type      String
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?
+  sentAt    DateTime?
+  createdAt DateTime            @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1107,20 +1125,20 @@ model Notification {
 }
 
 model SupportTicket {
-  id        String       @id @default(cuid())
-  userId    String
-  orderId   String?
-  bookingId String?
-  subject   String
-  message   String
-  status    TicketStatus @default(OPEN)
-  priority  String       @default("NORMAL")
+  id           String       @id @default(cuid())
+  userId       String
+  orderId      String?
+  bookingId    String?
+  subject      String
+  message      String
+  status       TicketStatus @default(OPEN)
+  priority     String       @default("NORMAL")
   /// ORDER | BOOKING | PAYMENT | ACCOUNT | OTHER
-  category  String       @default("OTHER")
+  category     String       @default("OTHER")
   assignedToId String?
-  resolvedAt DateTime?
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  resolvedAt   DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   assignedTo User?           @relation("TicketAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)

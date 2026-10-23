@@ -41,6 +41,9 @@ export const RATE_LIMITS = {
   estimatePreviewPerIpMinute: { bucket: "estimate.preview.ip.min", limit: 60, windowSec: 60 },
   estimateCreatePerUserHour: { bucket: "estimate.create.hour", limit: 60, windowSec: 3600 },
   reviewCreatePerUserDay: { bucket: "review.create.day", limit: 20, windowSec: 86_400 },
+  vendorRegisterPerUserDay: { bucket: "vendor.register.day", limit: 5, windowSec: 86_400 },
+  vendorUploadPerUserHour: { bucket: "vendor.upload.hour", limit: 30, windowSec: 3600 },
+  vendorProductSubmitPerUserDay: { bucket: "vendor.product.day", limit: 30, windowSec: 86_400 },
 } as const satisfies Record<string, RateLimitRule>;
 
 /** IPs and user agents are hashed before storage — they are personal data. */

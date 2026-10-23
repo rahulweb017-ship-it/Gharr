@@ -26,7 +26,7 @@ export function AdminShell({
             <LogoMark className="size-6" />
           </span>
           <span className="hidden text-base font-extrabold lg:inline">
-            Home<span className="text-brand-400">all</span>
+            Ghar<span className="text-brand-400">r</span>
             <span className="ml-1.5 rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-ink-200 uppercase">
               Admin
             </span>
